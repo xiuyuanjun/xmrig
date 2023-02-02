@@ -79,15 +79,18 @@ static inline const std::string &usage()
 
     u += "      --no-cpu                  disable CPU mining backend\n";
     u += "  -t, --threads=N               number of CPU threads, proper CPU affinity required for some optimizations.\n";
-    u += "      --cpu-affinity            set process affinity to CPU core(s), mask 0x3 for cores 0 and 1\n";
+    u += "      --cpu-affinity=N          set process affinity to CPU core(s), mask 0x3 for cores 0 and 1\n";
     u += "  -v, --av=N                    algorithm variation, 0 auto select\n";
-    u += "      --cpu-priority            set process priority (0 idle, 2 normal to 5 highest)\n";
+    u += "      --cpu-priority=N          set process priority (0 idle, 2 normal to 5 highest)\n";
     u += "      --cpu-max-threads-hint=N  maximum CPU threads count (in percentage) hint for autoconfig\n";
     u += "      --cpu-memory-pool=N       number of 2 MB pages for persistent memory pool, -1 (auto), 0 (disable)\n";
     u += "      --cpu-no-yield            prefer maximum hashrate rather than system response/stability\n";
     u += "      --no-huge-pages           disable huge pages support\n";
 #   ifdef XMRIG_OS_LINUX
     u += "      --hugepage-size=N         custom hugepage size in kB\n";
+#   endif
+#   ifdef XMRIG_ALGO_RANDOMX
+    u += "      --huge-pages-jit          enable huge pages support for RandomX JIT code\n";
 #   endif
     u += "      --asm=ASM                 ASM optimizations, possible values: auto, none, intel, ryzen, bulldozer\n";
 
@@ -103,11 +106,6 @@ static inline const std::string &usage()
     u += "      --randomx-wrmsr=N         write custom value(s) to MSR registers or disable MSR mod (-1)\n";
     u += "      --randomx-no-rdmsr        disable reverting initial MSR values on exit\n";
     u += "      --randomx-cache-qos       enable Cache QoS\n";
-#   endif
-
-#   ifdef XMRIG_ALGO_ASTROBWT
-    u += "      --astrobwt-max-size=N     skip hashes with large stage 2 size, default: 550, min: 400, max: 1200\n";
-    u += "      --astrobwt-avx2           enable AVX2 optimizations for AstroBWT algorithm";
 #   endif
 
 #   ifdef XMRIG_FEATURE_OPENCL
