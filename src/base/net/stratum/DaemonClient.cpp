@@ -1,13 +1,13 @@
 /* XMRig
- * Copyright 2010      Jeff Garzik <jgarzik@pobox.com>
- * Copyright 2012-2014 pooler      <pooler@litecoinpool.org>
- * Copyright 2014      Lucas Jones <https://github.com/lucasjones>
- * Copyright 2014-2016 Wolf9466    <https://github.com/OhGodAPet>
- * Copyright 2016      Jay D Dee   <jayddee246@gmail.com>
- * Copyright 2017-2018 XMR-Stak    <https://github.com/fireice-uk>, <https://github.com/psychocrypt>
- * Copyright 2019      Howard Chu  <https://github.com/hyc>
- * Copyright 2018-2020 SChernykh   <https://github.com/SChernykh>
- * Copyright 2016-2020 XMRig       <https://github.com/xmrig>, <support@xmrig.com>
+ * Copyright (c) 2010      Jeff Garzik <jgarzik@pobox.com>
+ * Copyright (c) 2012-2014 pooler      <pooler@litecoinpool.org>
+ * Copyright (c) 2014      Lucas Jones <https://github.com/lucasjones>
+ * Copyright (c) 2014-2016 Wolf9466    <https://github.com/OhGodAPet>
+ * Copyright (c) 2016      Jay D Dee   <jayddee246@gmail.com>
+ * Copyright (c) 2017-2018 XMR-Stak    <https://github.com/fireice-uk>, <https://github.com/psychocrypt>
+ * Copyright (c) 2019      Howard Chu  <https://github.com/hyc>
+ * Copyright (c) 2018-2023 SChernykh   <https://github.com/SChernykh>
+ * Copyright (c) 2016-2023 XMRig       <https://github.com/xmrig>, <support@xmrig.com>
  *
  *   This program is free software: you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -23,7 +23,6 @@
  *   along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-
 #include <uv.h>
 
 
@@ -34,6 +33,7 @@
 #include "base/io/json/JsonRequest.h"
 #include "base/io/log/Log.h"
 #include "base/kernel/interfaces/IClientListener.h"
+#include "base/kernel/Platform.h"
 #include "base/net/dns/Dns.h"
 #include "base/net/dns/DnsRecords.h"
 #include "base/net/http/Fetch.h"
@@ -42,9 +42,9 @@
 #include "base/net/stratum/SubmitResult.h"
 #include "base/net/tools/NetBuffer.h"
 #include "base/tools/bswap_64.h"
+#include "base/tools/cryptonote/Signatures.h"
 #include "base/tools/Cvt.h"
 #include "base/tools/Timer.h"
-#include "base/tools/cryptonote/Signatures.h"
 #include "net/JobResult.h"
 
 
@@ -148,6 +148,11 @@ int64_t xmrig::DaemonClient::submit(const JobResult &result)
         memcpy(data + sig_offset * 2, result.sig, 64 * 2);
         memcpy(data + m_blocktemplate.offset(BlockTemplate::TX_PUBKEY_OFFSET) * 2, result.sig_data, 32 * 2);
         memcpy(data + m_blocktemplate.offset(BlockTemplate::EPH_PUBLIC_KEY_OFFSET) * 2, result.sig_data + 32 * 2, 32 * 2);
+
+        // Handle view tag for txout_to_tagged_key outputs
+        if (m_blocktemplate.outputType() == 3) {
+            Cvt::toHex(data + m_blocktemplate.offset(BlockTemplate::EPH_PUBLIC_KEY_OFFSET) * 2 + 32 * 2, 2, &result.view_tag, 1);
+        }
     }
 
     if (result.extra_nonce >= 0) {
@@ -178,7 +183,10 @@ int64_t xmrig::DaemonClient::submit(const JobResult &result)
     m_results[m_sequence] = SubmitResult(m_sequence, result.diff, result.actualDiff(), 0, result.backend);
 #   endif
 
-    return rpcSend(doc);
+    std::map<std::string, std::string> headers;
+    headers.insert({"X-Hash-Difficulty", std::to_string(result.actualDiff())});
+
+    return rpcSend(doc, headers);
 }
 
 
@@ -303,6 +311,18 @@ void xmrig::DaemonClient::onHttpData(const HttpData &data)
 
 void xmrig::DaemonClient::onTimer(const Timer *)
 {
+    if (m_pool.zmq_port() >= 0) {
+        m_prevHash = nullptr;
+        m_blocktemplateRequestHash = nullptr;
+        send(kGetHeight);
+        return;
+    }
+
+    if (Chrono::steadyMSecs() >= m_jobSteadyMs + m_pool.jobTimeout()) {
+        m_prevHash = nullptr;
+        m_blocktemplateRequestHash = nullptr;
+    }
+
     if (m_state == ConnectingState) {
         connect();
     }
@@ -338,9 +358,9 @@ void xmrig::DaemonClient::onResolved(const DnsRecords &records, int status, cons
     uv_tcp_init(uv_default_loop(), s);
     uv_tcp_nodelay(s, 1);
 
-#   ifndef WIN32
-    uv_tcp_keepalive(s, 1, 60);
-#   endif
+    if (Platform::hasKeepalive()) {
+        uv_tcp_keepalive(s, 1, 60);
+    }
 
     if (m_pool.zmq_port() > 0) {
         delete m_ZMQSocket;
@@ -352,7 +372,7 @@ void xmrig::DaemonClient::onResolved(const DnsRecords &records, int status, cons
 
 bool xmrig::DaemonClient::isOutdated(uint64_t height, const char *hash) const
 {
-    return m_job.height() != height || m_prevHash != hash;
+    return m_job.height() != height || m_prevHash != hash || Chrono::steadyMSecs() >= m_jobSteadyMs + m_pool.jobTimeout();
 }
 
 
@@ -389,7 +409,8 @@ bool xmrig::DaemonClient::parseJob(const rapidjson::Value &params, int *code)
         m_blocktemplate.offset(BlockTemplate::TX_PUBKEY_OFFSET) - k,
         m_blocktemplate.offset(BlockTemplate::TX_EXTRA_NONCE_OFFSET) - k,
         m_blocktemplate.txExtraNonce().size(),
-        m_blocktemplate.minerTxMerkleTreeBranch()
+        m_blocktemplate.minerTxMerkleTreeBranch(),
+        m_blocktemplate.outputType() == 3
     );
 #   endif
 
@@ -426,7 +447,7 @@ bool xmrig::DaemonClient::parseJob(const rapidjson::Value &params, int *code)
         }
 
         uint8_t derivation[32];
-        if (!generate_key_derivation(m_blocktemplate.blob(BlockTemplate::TX_PUBKEY_OFFSET), secret_viewkey, derivation)) {
+        if (!generate_key_derivation(m_blocktemplate.blob(BlockTemplate::TX_PUBKEY_OFFSET), secret_viewkey, derivation, nullptr)) {
             return jobError("Failed to generate key derivation for miner signature.");
         }
 
@@ -468,6 +489,7 @@ bool xmrig::DaemonClient::parseJob(const rapidjson::Value &params, int *code)
     m_job              = std::move(job);
     m_blocktemplateStr = std::move(blocktemplate);
     m_prevHash         = Json::getString(params, "prev_hash");
+    m_jobSteadyMs      = Chrono::steadyMSecs();
 
     if (m_state == ConnectingState) {
         setState(ConnectedState);
@@ -540,9 +562,13 @@ int64_t xmrig::DaemonClient::getBlockTemplate()
 }
 
 
-int64_t xmrig::DaemonClient::rpcSend(const rapidjson::Document &doc)
+int64_t xmrig::DaemonClient::rpcSend(const rapidjson::Document &doc, const std::map<std::string, std::string> &headers)
 {
     FetchRequest req(HTTP_POST, m_pool.host(), m_pool.port(), kJsonRPC, doc, m_pool.isTLS(), isQuiet());
+    for (const auto &header : headers) {
+        req.headers.insert(header);
+    }
+
     fetch(tag(), std::move(req), m_httpListener);
 
     return m_sequence++;
@@ -563,6 +589,9 @@ void xmrig::DaemonClient::retry()
     }
 
     if ((m_ZMQConnectionState != ZMQ_NOT_CONNECTED) && (m_ZMQConnectionState != ZMQ_DISCONNECTING)) {
+        if (Platform::hasKeepalive()) {
+            uv_tcp_keepalive(m_ZMQSocket, 0, 60);
+        }
         uv_close(reinterpret_cast<uv_handle_t*>(m_ZMQSocket), onZMQClose);
     }
 
@@ -595,6 +624,10 @@ void xmrig::DaemonClient::setState(SocketState state)
             if (m_pool.zmq_port() < 0) {
                 const uint64_t interval = std::max<uint64_t>(20, m_pool.pollInterval());
                 m_timer->start(interval, interval);
+            }
+            else {
+                const uint64_t t = m_pool.jobTimeout();
+                m_timer->start(t, t);
             }
         }
         break;
@@ -865,7 +898,12 @@ void xmrig::DaemonClient::ZMQParse()
     // Clear previous hash and check daemon height to guarantee that xmrig will call get_block_template RPC later
     // We can't call get_block_template directly because daemon is not ready yet
     m_prevHash = nullptr;
+    m_blocktemplateRequestHash = nullptr;
     send(kGetHeight);
+
+    const uint64_t t = m_pool.jobTimeout();
+    m_timer->stop();
+    m_timer->start(t, t);
 }
 
 
@@ -881,6 +919,9 @@ bool xmrig::DaemonClient::ZMQClose(bool shutdown)
     m_ZMQConnectionState = ZMQ_DISCONNECTING;
 
     if (uv_is_closing(reinterpret_cast<uv_handle_t*>(m_ZMQSocket)) == 0) {
+        if (Platform::hasKeepalive()) {
+            uv_tcp_keepalive(m_ZMQSocket, 0, 60);
+        }
         uv_close(reinterpret_cast<uv_handle_t*>(m_ZMQSocket), shutdown ? onZMQShutdown : onZMQClose);
         if (!shutdown) {
             retry();
